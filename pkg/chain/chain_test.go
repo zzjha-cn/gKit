@@ -17,10 +17,17 @@ func (s *Server) GetId(name string) string {
 	return s.Id
 }
 
-func TestUseMiddleware(t *testing.T) {
-	s := &Server{}
-	d := CombineSrvChain(&FilterChain{}, s.GetId)
-	id := d("name")
+func TestUseFilterChain(t *testing.T) {
+	s := &Server{
+		Id: "use_filter_chain",
+	}
+
+	ch := NewFilterChain()
+	ch.BeforeInvoke(RecoveryFilter, TimeQueryFilter)
+	ch.AfterInvoke(StopFilter)
+
+	get := CombineSrvChain(ch, s.GetId)
+	id := get("name")
 	fmt.Println(id)
 }
 
