@@ -24,7 +24,7 @@ func TestExam(t *testing.T) {
 	chanLeakOfMemory2()
 	time.Sleep(time.Second * 3) // 等待 goroutine 执行，防止过早输出结果
 	fmt.Println("NumGoroutine:", runtime.NumGoroutine())
-	// 就是超时机制，接收者这边直接离开了协程，剩下的生产者还是在阻塞中
+	// 加了超时机制，接收者这边直接离开了协程，剩下的生产者还是在阻塞中
 
 	// 所以，解决方式还是应该使用优雅的方式——增加一个额外的stop channel用来终结发送者的chan
 	chanLeakOfMemory3()
@@ -73,12 +73,12 @@ func chanLeakOfMemory2() {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
-		for i := range ich { // (2)
+		for range ich { // (2)
 			if ctx.Err() != nil { // (1)
 				fmt.Println(ctx.Err())
-				return // 这里你拍拍屁股直接退出了，然后生产者那边还是傻乎乎发送呢
+				return // 退出后，发送端还在发送
 			}
-			fmt.Println(i)
+			// fmt.Println(i)
 		}
 	}()
 } // 就是超时机制，接收者这边直接离开了协程，剩下的生产者还是在阻塞中
@@ -115,4 +115,4 @@ func chanLeakOfMemory3() {
 			fmt.Println(i)
 		}
 	}()
-} // 就是超时机制
+}
