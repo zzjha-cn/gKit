@@ -1,7 +1,6 @@
 package chain
 
 import (
-	"fmt"
 	"reflect"
 )
 
@@ -66,7 +65,6 @@ func CombineSrvChain[T any](fil *FilterChain, t T) T {
 	// 创建新的函数(具有相同函数签名)
 	copiedFunc := reflect.MakeFunc(fnValue.Type(), func(args []reflect.Value) []reflect.Value {
 		ctx := fil.MakeChainCtx(nil, nil)
-		fmt.Println(fnValue.Type().String())
 		ctx.MethodName = fnValue.String()
 		if fil.makeArg != nil {
 			fil.makeArg(ctx, args)
