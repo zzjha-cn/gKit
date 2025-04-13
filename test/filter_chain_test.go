@@ -2,9 +2,10 @@ package test
 
 import (
 	"fmt"
-	"gKit/pkg/chain"
 	"reflect"
 	"testing"
+
+	"github.com/zzjha-cn/gKit/pkg/chain"
 )
 
 type (
