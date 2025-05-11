@@ -2,7 +2,7 @@
 go get google.golang.org/protobuf/proto
 
 # 安装golang构建grpc服务的框架库
-go get google.golang.org/grpc
+go get google.golang.org/grpc@v1.67.0 # go 1.21.11版本安装
 
 # go 1.21.11版本安装
 # 安装帮助protoc生成golang代码的插件
