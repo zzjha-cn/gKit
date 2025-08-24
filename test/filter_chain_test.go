@@ -1,9 +1,11 @@
 package test
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/zzjha-cn/gKit/pkg/chain"
 )
@@ -25,10 +27,10 @@ func TestChain(t *testing.T) {
 			Id: "use_filter_chain",
 		}
 
-		ch := chain.NewFilterChain()
-		ch.BeforeInvoke(chain.RecoveryFilter, chain.TimeQueryFilter)
-		ch.AfterInvoke(chain.StopFilter)
-		ch.SetTansferFn(func(ctx *chain.ChainContext, args []reflect.Value) error {
+		ch := chain.NewNormalChain()
+		ch.BeforeInvoke(RecoveryFilter, TimeQueryFilter)
+		ch.AfterInvoke(StopFilter)
+		ch.SetCollectFn(func(ctx *chain.NormalCtx, args []reflect.Value) error {
 			ctx.Args = []any{args[0].Interface()}
 			return nil
 		}, nil)
@@ -37,4 +39,32 @@ func TestChain(t *testing.T) {
 		id := get("name")
 		fmt.Println(id)
 	})
+}
+
+func TimeQueryFilter(ctx *chain.NormalCtx) {
+	ti := time.Now()
+	ctx.Next()
+	fmt.Printf("query[%s] mills:%dms\n", ctx.MethodName, time.Since(ti).Milliseconds())
+}
+
+func StopFilter(ctx *chain.NormalCtx) {
+	if len(ctx.Args) > 0 {
+		if c, ok := ctx.Args[0].(context.Context); ok {
+			if c.Value("STOP_CTX") != nil {
+				return
+			}
+		} else {
+			fmt.Println(ctx.Args[0])
+		}
+	}
+	ctx.Next()
+}
+
+func RecoveryFilter(ctx *chain.NormalCtx) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			fmt.Printf("panic [%s] (%v)", ctx.MethodName, rec)
+		}
+	}()
+	ctx.Next()
 }
