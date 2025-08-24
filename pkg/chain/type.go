@@ -25,10 +25,10 @@ type (
 	}
 
 	CtxBuilder struct {
-		Name         string
-		Args         []reflect.Value
-		callResult   []reflect.Value
-		userFunction func(args []reflect.Value) []reflect.Value
+		Name         string                                     // 上下文传入的方法名称
+		Args         []reflect.Value                            // 需要调用实际逻辑的入参
+		callResult   []reflect.Value                            // 实际逻辑的返回内容
+		userFunction func(args []reflect.Value) []reflect.Value // 通过反射拿到的实际逻辑调用
 	}
 )
 
@@ -41,6 +41,8 @@ func (b *CtxBuilder) SetCallResult(x []reflect.Value) {
 func (b *CtxBuilder) GetCallResult() []reflect.Value {
 	return b.callResult
 }
+
+// 执行实际逻辑
 func (b *CtxBuilder) Handle() []reflect.Value {
 	res := b.userFunction(b.Args)
 	b.callResult = res
