@@ -165,7 +165,7 @@ func (mp *MITMProxy) handleMITM(w http.ResponseWriter, r *http.Request) {
 		// 连接关闭时，优雅关闭server
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer shutdownCancel()
-		
+
 		if err := server.Shutdown(shutdownCtx); err != nil {
 			mp.logger.Printf("MITM服务器关闭失败: %v", err)
 			server.Close() // 强制关闭
