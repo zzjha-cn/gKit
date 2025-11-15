@@ -10,7 +10,7 @@ import (
 // =》通过中间层，将不同签名的函数转为相同的签名然后实现递归调用
 // =》将一组同接口的实现转化递归模式
 
-func CommonRecursively[T func() error](list []T) error {
+func CommonRecursively(list []func() error) error {
 	if len(list) <= 0 {
 		return nil
 	}
@@ -51,7 +51,7 @@ type (
 	Collect[T any] func(ctx *Context) (T, error)
 )
 
-func RecursivelyWithImpl[T IList2Recursive](list []IList2Recursive, ctx *Context) {
+func RecursivelyWithImpl(list []IList2Recursive, ctx *Context) {
 	var length = len(list)
 	var eFn func(index int, ctx *Context)
 	eFn = func(index int, ctx *Context) {
