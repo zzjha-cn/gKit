@@ -8,6 +8,8 @@ import (
 	"github.com/coreos/etcd/clientv3"
 )
 
+// go get go.etcd.io/etcd/client/v3@v3.5.10
+
 /*
 对于简单的、非排他的配置读写，直接使用 clientv3 即可。
 但对于需要保证资源互斥访问的分布式锁，
