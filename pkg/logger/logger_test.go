@@ -22,7 +22,8 @@ func TestNewLogger(t *testing.T) {
 	}
 
 	auditLogger.Info("this is an audit message")
-	auditLogger.Infow("user action", "action", "login", "user_id", 123)
+	// auditLogger.Infow("user action", "action", "login", "user_id", 123)
+	auditLogger.Infow("user action", LogField{"action": "login", "user_id": 123, "data": LogField{"req": "req_id", "session": 1231213}})
 	auditLogger.Error("this is an error message")
 
 	// 刷新缓冲区以确保写入文件

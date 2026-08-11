@@ -64,18 +64,33 @@ func (l *zapLogger) Errorf(template string, args ...interface{}) { l.sugar.Error
 func (l *zapLogger) Fatalf(template string, args ...interface{}) { l.sugar.Fatalf(template, args...) }
 
 func (l *zapLogger) Debugw(msg string, keysAndValues ...interface{}) {
+	if v, ok := findLogField(keysAndValues); ok {
+		keysAndValues = v
+	}
 	l.sugar.Debugw(msg, keysAndValues...)
 }
 func (l *zapLogger) Infow(msg string, keysAndValues ...interface{}) {
+	if v, ok := findLogField(keysAndValues); ok {
+		keysAndValues = v
+	}
 	l.sugar.Infow(msg, keysAndValues...)
 }
 func (l *zapLogger) Warnw(msg string, keysAndValues ...interface{}) {
+	if v, ok := findLogField(keysAndValues); ok {
+		keysAndValues = v
+	}
 	l.sugar.Warnw(msg, keysAndValues...)
 }
 func (l *zapLogger) Errorw(msg string, keysAndValues ...interface{}) {
+	if v, ok := findLogField(keysAndValues); ok {
+		keysAndValues = v
+	}
 	l.sugar.Errorw(msg, keysAndValues...)
 }
 func (l *zapLogger) Fatalw(msg string, keysAndValues ...interface{}) {
+	if v, ok := findLogField(keysAndValues); ok {
+		keysAndValues = v
+	}
 	l.sugar.Fatalw(msg, keysAndValues...)
 }
 
