@@ -46,6 +46,23 @@ var (
 	global Logger
 )
 
+// init 提供未调用 InitLogger 时的兜底实例。
+//
+// 没有它的话，任何在 InitLogger 之前触发的包级调用（logger.Errorw / logger.With…）
+// 都会 nil panic —— 这在被当作库引用时非常容易发生：构造函数里取一个 With(...)
+// 就够了，而调用方的 main 可能还没初始化日志。
+//
+// 输出到 stderr 而不是 stdout，避免污染业务自己的标准输出；
+// InitLogger 会整体覆盖它。
+func init() {
+	encoderConfig := zap.NewDevelopmentEncoderConfig()
+	encoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
+	core := zapcore.NewCore(zapcore.NewConsoleEncoder(encoderConfig), zapcore.AddSync(os.Stderr), zap.InfoLevel)
+
+	Log = zap.New(core, zap.AddCaller(), zap.AddCallerSkip(1))
+	global = &zapLogger{sugar: Log.Sugar()}
+}
+
 // zapLogger 是 Logger 接口的 zap 实现
 type zapLogger struct {
 	sugar *zap.SugaredLogger
