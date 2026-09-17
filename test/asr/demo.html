@@ -1,0 +1,487 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>实时语音转录联调</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", sans-serif; max-width: 800px; margin: 32px auto; padding: 0 16px; color: #222; }
+  h2 { margin-bottom: 4px; }
+  fieldset { border: 1px solid #ddd; border-radius: 6px; margin-bottom: 14px; padding: 12px 14px; }
+  legend { padding: 0 6px; color: #555; font-size: 13px; }
+  label { display: inline-block; width: 92px; font-size: 14px; }
+  input, select { width: 380px; max-width: 62%; padding: 5px 7px; }
+  button { padding: 8px 18px; margin-right: 8px; font-size: 15px; cursor: pointer; }
+  button:disabled { cursor: not-allowed; opacity: .5; }
+  #status { margin: 12px 0; color: #666; font-size: 13px; }
+  #output { border: 1px solid #ddd; border-radius: 6px; min-height: 150px; padding: 12px; line-height: 1.9; font-size: 16px; }
+  .final { color: #111; }
+  .partial { color: #999; }
+  #log { margin-top: 14px; height: 190px; overflow: auto; background: #fafafa; border: 1px solid #eee;
+         border-radius: 6px; padding: 8px; font: 12px/1.6 ui-monospace, Menlo, monospace; white-space: pre-wrap; }
+  .banner { border-radius: 6px; padding: 10px 12px; margin-bottom: 14px; font-size: 14px; line-height: 1.7; display: none; }
+  .banner.err { background: #fff2f0; border: 1px solid #ffccc7; color: #a8071a; display: block; }
+  .banner.warn { background: #fffbe6; border: 1px solid #ffe58f; color: #874d00; display: block; }
+  .banner code { background: rgba(0,0,0,.06); padding: 1px 5px; border-radius: 3px; }
+  .checks { font: 13px/1.9 ui-monospace, Menlo, monospace; }
+  .ok { color: #237804; } .bad { color: #cf1322; } .na { color: #999; }
+  #meterWrap { display: inline-block; vertical-align: middle; width: 180px; height: 10px;
+               background: #eee; border-radius: 5px; overflow: hidden; margin-left: 10px; }
+  #meter { height: 100%; width: 0; background: #52c41a; transition: width .08s linear; }
+</style>
+</head>
+<body>
+<h2>实时语音转录联调页</h2>
+<p style="color:#888;font-size:13px;margin-top:0">GET /asr/v1/stream — PCM16LE / 16kHz / 单声道</p>
+
+<div id="banner" class="banner"></div>
+
+<fieldset>
+  <legend>环境自检</legend>
+  <div class="checks" id="checks">检测中…</div>
+  <p style="margin-bottom:0"><button id="recheck" style="padding:4px 12px;font-size:13px">重新检测</button></p>
+</fieldset>
+
+<fieldset>
+  <legend>连接</legend>
+  <p><label>网关地址</label><input id="url" value="ws://127.0.0.1:2208/api/asr/v1/stream"></p>
+  <p><label>token</label><input id="token" value="" placeholder="服务端未配置 token 时留空"></p>
+  <p style="margin-bottom:0"><label>麦克风</label><select id="mic"><option value="">默认设备</option></select></p>
+</fieldset>
+
+<button id="start">开始录音</button>
+<button id="stop" disabled>停止</button>
+<span id="meterWrap" title="输入音量"><span id="meter"></span></span>
+<div id="status">未连接</div>
+
+<div id="output"><span class="final" id="finals"></span><span class="partial" id="partial"></span></div>
+<div id="log"></div>
+
+<script>
+// 采集链路：getUserMedia -> AudioWorklet -> 降采样到 16k -> Int16LE -> ws.send
+// 用 AudioWorklet，不用已废弃的 ScriptProcessor。
+const TARGET_RATE = 16000;
+const FRAME_MS = 100;                                  // 100ms 一帧
+const FRAME_SAMPLES = TARGET_RATE * FRAME_MS / 1000;   // 1600 采样点 = 3200 字节
+
+const $ = (id) => document.getElementById(id);
+let ws, audioCtx, workletNode, mediaStream, sinkNode;
+let readyToSend = false;   // 服务端要求收到 ready 之后再发音频
+
+function log(msg) {
+  const el = $('log');
+  el.textContent += new Date().toLocaleTimeString() + '  ' + msg + '\n';
+  el.scrollTop = el.scrollHeight;
+}
+
+function banner(kind, html) {
+  const el = $('banner');
+  el.className = 'banner ' + kind;
+  el.innerHTML = html;
+}
+function clearBanner() { $('banner').className = 'banner'; }
+
+/* ---------------- 环境自检 ---------------- */
+// 麦克风只能在安全上下文里用：https、http://localhost、http://127.0.0.1。
+// 直接双击用 file:// 打开时 origin 是 null，浏览器一定拒绝授权。
+async function runChecks() {
+  const lines = [];
+  const isFile = location.protocol === 'file:';
+  const secure = window.isSecureContext;
+  const hasMedia = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+
+  lines.push(row('页面来源', location.origin === 'null' ? 'file://（本地文件）' : location.origin, !isFile));
+  lines.push(row('安全上下文', secure ? '是' : '否', secure));
+  lines.push(row('getUserMedia', hasMedia ? '可用' : '不可用', hasMedia));
+
+  let permState = '未知';
+  if (navigator.permissions && navigator.permissions.query) {
+    try {
+      const p = await navigator.permissions.query({ name: 'microphone' });
+      permState = { granted: '已授权', denied: '已拒绝', prompt: '待询问' }[p.state] || p.state;
+      lines.push(row('麦克风权限', permState, p.state !== 'denied'));
+      p.onchange = () => runChecks();
+    } catch (e) {
+      lines.push(row('麦克风权限', '无法查询（正常，点开始时会弹窗）', null));
+    }
+  } else {
+    lines.push(row('麦克风权限', '浏览器不支持查询', null));
+  }
+
+  // worklet 必须是同源的真实文件，Safari 不接受 blob:
+  if (location.protocol.startsWith('http')) {
+    try {
+      const res = await fetch(WORKLET_FILE, { cache: 'no-store' });
+      lines.push(row('worklet 文件', res.ok ? WORKLET_FILE + ' 可访问' : WORKLET_FILE + ' 返回 ' + res.status, res.ok));
+    } catch (e) {
+      lines.push(row('worklet 文件', WORKLET_FILE + ' 取不到（将回退 ScriptProcessor）', false));
+    }
+  } else {
+    lines.push(row('worklet 文件', '本地文件模式下无法检测', null));
+  }
+
+  $('checks').innerHTML = lines.join('<br>');
+
+  clearBanner();
+  if (isFile || !secure || !hasMedia) {
+    banner('err',
+      '<b>当前环境拿不到麦克风权限。</b>浏览器只允许在安全上下文里录音。<br>' +
+      '请在本目录下起一个静态服务，然后用 <code>localhost</code> 打开本页：<br>' +
+      '<code>cd test/asr && python3 -m http.server 8000</code><br>' +
+      '再访问 <code>http://localhost:8000/demo.html</code><br>' +
+      '（注意：用局域网 IP 如 <code>http://10.10.x.x:8000</code> 走 http 同样不算安全上下文，只有 localhost / 127.0.0.1 或 https 才行）');
+  } else if (permState === '已拒绝') {
+    banner('warn',
+      '<b>麦克风权限之前被拒绝过</b>，浏览器不会再弹窗。<br>' +
+      '点地址栏左侧的图标 → 网站设置 → 把「麦克风」改为允许，然后刷新本页。');
+  }
+
+  // 已授权时才能拿到设备名，否则 label 是空的
+  if (hasMedia) await listMics();
+}
+
+function row(name, value, ok) {
+  const cls = ok === null ? 'na' : (ok ? 'ok' : 'bad');
+  const mark = ok === null ? '·' : (ok ? '✓' : '✗');
+  return `<span class="${cls}">${mark}</span> ${name}：<span class="${cls}">${value}</span>`;
+}
+
+async function listMics() {
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const mics = devices.filter(d => d.kind === 'audioinput');
+    const sel = $('mic');
+    const cur = sel.value;
+    sel.innerHTML = '<option value="">默认设备</option>' +
+      mics.map((d, i) => `<option value="${d.deviceId}">${d.label || ('麦克风 ' + (i + 1))}</option>`).join('');
+    sel.value = cur;
+  } catch (e) { /* 未授权时枚举不到，忽略 */ }
+}
+
+/* ---------------- 音频处理 ---------------- */
+// worklet 的源码同时存在两份：
+//   1. 同目录的 collector-worklet.js —— 首选，Safari 只认这种
+//   2. 下面这段字符串做成 blob —— 兜底，防止漏拷 js 文件（Chrome/Firefox 可用）
+const WORKLET_FILE = 'collector-worklet.js';
+const workletCode = `
+class Collector extends AudioWorkletProcessor {
+  constructor() { super(); this.buf = []; this.len = 0; this.chunk = 128 * 8; }
+  process(inputs) {
+    const ch = inputs[0] && inputs[0][0];
+    if (ch) { this.buf.push(new Float32Array(ch)); this.len += ch.length;
+      if (this.len >= this.chunk) {
+        const merged = new Float32Array(this.len);
+        let off = 0;
+        for (const b of this.buf) { merged.set(b, off); off += b.length; }
+        this.port.postMessage(merged, [merged.buffer]);
+        this.buf = []; this.len = 0;
+      }
+    }
+    return true;
+  }
+}
+registerProcessor('collector', Collector);
+`;
+
+// Safari 报 "Unable to load a worklet's module." 就是因为它不接受 blob: URL，
+// 所以这里先试真实文件，失败再退回 blob。
+async function loadWorkletModule(ctx) {
+  if (!ctx.audioWorklet) throw new Error('浏览器不支持 AudioWorklet');
+  const errors = [];
+
+  try {
+    await ctx.audioWorklet.addModule(WORKLET_FILE);
+    return 'file';
+  } catch (e) {
+    errors.push(WORKLET_FILE + ' → ' + (e.message || e));
+  }
+
+  let url;
+  try {
+    url = URL.createObjectURL(new Blob([workletCode], { type: 'text/javascript' }));
+    await ctx.audioWorklet.addModule(url);
+    return 'blob';
+  } catch (e) {
+    errors.push('blob → ' + (e.message || e));
+    throw new Error(errors.join(' ; '));
+  } finally {
+    if (url) URL.revokeObjectURL(url);
+  }
+}
+
+// 建立采集节点，优先 AudioWorklet，不行就退回 ScriptProcessor。
+// ScriptProcessor 虽然已废弃，但联调页的首要目标是"能录上"。
+async function createCaptureNode(onFrames) {
+  try {
+    const via = await loadWorkletModule(audioCtx);
+    const node = new AudioWorkletNode(audioCtx, 'collector');
+    node.port.onmessage = (e) => onFrames(e.data);
+    log('采集方式：AudioWorklet（' + (via === 'file' ? '独立文件' : 'blob 兜底') + '）');
+    return node;
+  } catch (err) {
+    log('[warn] AudioWorklet 不可用：' + (err.message || err));
+    banner('warn',
+      '<b>AudioWorklet 加载失败，已回退到 ScriptProcessor</b>（功能正常，只是用了废弃 API）。<br>' +
+      '常见原因：页面不是由静态服务提供，导致同目录的 <code>' + WORKLET_FILE + '</code> 取不到；' +
+      'Safari 还会因为不接受 blob: 而报 “Unable to load a worklet’s module.”。<br>' +
+      '把 <code>' + WORKLET_FILE + '</code> 和本页放在同一目录并用 <code>http://localhost</code> 打开即可恢复。<br>' +
+      '<span style="color:#888">明细：' + (err.message || err) + '</span>');
+
+    if (!audioCtx.createScriptProcessor) throw new Error('浏览器既不支持 AudioWorklet 也不支持 ScriptProcessor');
+    const node = audioCtx.createScriptProcessor(4096, 1, 1);
+    node.onaudioprocess = (e) => onFrames(new Float32Array(e.inputBuffer.getChannelData(0)));
+    return node;
+  }
+}
+
+// 线性插值降采样到 16k
+function downsample(input, inRate) {
+  if (inRate === TARGET_RATE) return input;
+  const ratio = inRate / TARGET_RATE;
+  const out = new Float32Array(Math.floor(input.length / ratio));
+  for (let i = 0; i < out.length; i++) {
+    const pos = i * ratio, idx = Math.floor(pos), frac = pos - idx;
+    const a = input[idx] || 0, b = input[idx + 1] !== undefined ? input[idx + 1] : a;
+    out[i] = a + (b - a) * frac;
+  }
+  return out;
+}
+
+function toPCM16(float32) {
+  const buf = new ArrayBuffer(float32.length * 2);
+  const view = new DataView(buf);
+  for (let i = 0; i < float32.length; i++) {
+    const s = Math.max(-1, Math.min(1, float32[i]));
+    view.setInt16(i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true); // 小端
+  }
+  return buf;
+}
+
+// 把 getUserMedia 的报错翻译成能照着做的说明
+function micErrorHint(err) {
+  const name = err && err.name;
+  switch (name) {
+    case 'NotAllowedError':
+    case 'PermissionDeniedError':
+      return '你拒绝了麦克风授权，或浏览器已记住上次的拒绝。点地址栏左侧图标 → 网站设置 → 麦克风改为允许，再刷新页面。';
+    case 'NotFoundError':
+    case 'DevicesNotFoundError':
+      return '没有找到可用的麦克风设备，检查设备是否插好、系统里是否被禁用。';
+    case 'NotReadableError':
+    case 'TrackStartError':
+      return '麦克风被其他程序占用（会议软件、录音软件等），关掉它们再试。';
+    case 'OverconstrainedError':
+      return '选中的麦克风不支持所需参数，换一个设备或选「默认设备」。';
+    case 'SecurityError':
+      return '当前页面不是安全上下文，请用 http://localhost 或 https 打开。';
+    case 'AbortError':
+      return '系统层面拿不到设备，macOS 请到「系统设置 → 隐私与安全性 → 麦克风」里给浏览器打开权限。';
+    default:
+      return '未知错误：' + (err && err.message || err);
+  }
+}
+
+const sentences = new Map();   // sentence_id -> 定稿文本
+
+function render() {
+  $('finals').textContent = [...sentences.keys()].sort((a, b) => a - b)
+    .map(k => sentences.get(k)).join('');
+}
+
+/* ---------------- 主流程 ---------------- */
+// 顺序很重要：先拿麦克风权限，成功之后再连 WebSocket。
+// 反过来的话权限失败时会留下一条已经发过 start 的空连接。
+$('start').onclick = async () => {
+  sentences.clear(); render();
+  $('partial').textContent = '';
+  readyToSend = false;
+  clearBanner();
+
+  if (!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)) {
+    await runChecks();
+    log('[abort] 当前环境不支持录音');
+    return;
+  }
+
+  // 1) 先要权限
+  $('status').textContent = '正在请求麦克风权限…';
+  const deviceId = $('mic').value;
+  try {
+    mediaStream = await navigator.mediaDevices.getUserMedia({
+      audio: Object.assign(
+        { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        deviceId ? { deviceId: { exact: deviceId } } : {}
+      )
+    });
+  } catch (err) {
+    const hint = micErrorHint(err);
+    banner('err', '<b>麦克风不可用（' + (err.name || 'Error') + '）</b><br>' + hint);
+    $('status').textContent = '麦克风授权失败';
+    log('[mic] ' + (err.name || 'Error') + ' — ' + hint);
+    await runChecks();
+    return;
+  }
+  await listMics();   // 授权后才能拿到设备名
+
+  // 2) 建音频图
+  try {
+    // 直接要 16k，拿得到就省掉一次重采样；拿不到就退回默认采样率自己降采样
+    try { audioCtx = new AudioContext({ sampleRate: TARGET_RATE }); }
+    catch (e) { audioCtx = new AudioContext(); }
+    if (audioCtx.state === 'suspended') await audioCtx.resume();
+
+    const source = audioCtx.createMediaStreamSource(mediaStream);
+
+    let pending = new Float32Array(0);
+    workletNode = await createCaptureNode((frame) => {
+      updateMeter(frame);
+      if (!readyToSend || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+      const ds = downsample(frame, audioCtx.sampleRate);
+      const merged = new Float32Array(pending.length + ds.length);
+      merged.set(pending); merged.set(ds, pending.length);
+
+      let off = 0;
+      while (merged.length - off >= FRAME_SAMPLES) {
+        ws.send(toPCM16(merged.subarray(off, off + FRAME_SAMPLES)));
+        off += FRAME_SAMPLES;
+      }
+      pending = merged.slice(off);
+    });
+
+    source.connect(workletNode);
+    // 接一个静音 gain 再到 destination：让 worklet 持续被调度，又不会自己听到自己
+    sinkNode = audioCtx.createGain();
+    sinkNode.gain.value = 0;
+    workletNode.connect(sinkNode);
+    sinkNode.connect(audioCtx.destination);
+
+    log('麦克风就绪，采集采样率 ' + audioCtx.sampleRate + 'Hz' +
+        (audioCtx.sampleRate === TARGET_RATE ? '（无需重采样）' : '（将降采样到 16000Hz）'));
+  } catch (err) {
+    banner('err', '<b>音频初始化失败</b><br>' + (err.message || err));
+    teardownAudio();
+    return;
+  }
+
+  // 3) 再连 WebSocket
+  const base = $('url').value.trim();
+  const token = $('token').value.trim();
+  const url = base + (token ? (base.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(token) : '');
+  $('status').textContent = '正在连接 ' + url + ' …';
+
+  try { ws = new WebSocket(url); }
+  catch (err) {
+    banner('err', '<b>WebSocket 地址不合法</b><br>' + (err.message || err));
+    teardownAudio();
+    return;
+  }
+  ws.binaryType = 'arraybuffer';
+
+  ws.onopen = () => {
+    $('status').textContent = '已连接，等待 ready…';
+    log('[ws] connected');
+    ws.send(JSON.stringify({
+      action: 'start', format: 'pcm', sample_rate: TARGET_RATE, language_hints: ['zh'],
+    }));
+  };
+
+  ws.onmessage = (e) => {
+    let msg;
+    try { msg = JSON.parse(e.data); } catch (_) { return; }
+    const d = msg.data || {};
+    switch (msg.event) {
+      case 'ready':
+        readyToSend = true;   // 从这里开始才发音频
+        $('status').textContent = '识别中… session=' + d.session_id;
+        log('[ready] ' + d.session_id);
+        break;
+      case 'partial':
+        $('partial').textContent = d.text;
+        break;
+      case 'final':
+        sentences.set(d.sentence_id, d.text);
+        $('partial').textContent = '';
+        render();
+        log('[final] #' + d.sentence_id + ' ' + d.text);
+        break;
+      case 'done':
+        $('status').textContent = '已结束，计费时长 ' + d.duration_sec + 's';
+        log('[done] duration=' + d.duration_sec);
+        break;
+      case 'error':
+        $('status').textContent = '服务端错误：' + d.msg;
+        banner('err', '<b>服务端返回 error</b><br>code=' + d.code + '　' + d.msg +
+                      (d.upstream_code ? '　upstream=' + d.upstream_code : ''));
+        log('[error] ' + d.code + ' ' + d.msg + ' ' + (d.upstream_code || ''));
+        break;
+    }
+  };
+
+  ws.onerror = () => {
+    log('[ws] error');
+    banner('err', '<b>WebSocket 连接失败</b><br>确认服务已启动、地址端口正确；' +
+                  '若页面是 https，WebSocket 也必须用 wss。');
+  };
+
+  ws.onclose = (e) => {
+    readyToSend = false;
+    log('[ws] closed code=' + e.code + (e.reason ? ' reason=' + e.reason : ''));
+    if (e.code === 1006 && !sentences.size) {
+      banner('err', '<b>连接被异常关闭（1006）</b><br>' +
+        '常见原因：token 不对（401）、并发已满或服务未启用（503）、地址写错。' +
+        '打开浏览器 Network 面板看握手响应的状态码可以确认。');
+    }
+    teardownAudio();
+    $('status').textContent = '连接已关闭';
+  };
+
+  $('start').disabled = true;
+  $('stop').disabled = false;
+};
+
+$('stop').onclick = () => {
+  // 只停采集，连接留着接收剩余的 final 和 done
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ action: 'stop' }));
+  readyToSend = false;
+  teardownAudio();
+  $('status').textContent = '已停止录音，等待最终结果…';
+  log('[stop] 已发送 stop');
+};
+
+let meterTimer = 0;
+function updateMeter(frame) {
+  let sum = 0;
+  for (let i = 0; i < frame.length; i++) sum += frame[i] * frame[i];
+  const rms = Math.sqrt(sum / frame.length);
+  const pct = Math.min(100, Math.round(rms * 300));
+  $('meter').style.width = pct + '%';
+  clearTimeout(meterTimer);
+  meterTimer = setTimeout(() => { $('meter').style.width = '0%'; }, 400);
+}
+
+function teardownAudio() {
+  if (workletNode) {
+    try {
+      if (workletNode.port) workletNode.port.onmessage = null;   // AudioWorkletNode
+      else workletNode.onaudioprocess = null;                     // ScriptProcessorNode
+      workletNode.disconnect();
+    } catch (e) {}
+    workletNode = null;
+  }
+  if (sinkNode) { try { sinkNode.disconnect(); } catch (e) {} sinkNode = null; }
+  if (mediaStream) { mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }
+  if (audioCtx) { try { audioCtx.close(); } catch (e) {} audioCtx = null; }
+  $('meter').style.width = '0%';
+  $('start').disabled = false;
+  $('stop').disabled = true;
+}
+
+/* ---------------- 初始化 ---------------- */
+// 注意：页面通常由本地静态服务（如 8000 端口）提供，而网关在另一个端口，
+// 所以这里不按 location 自动改写地址，保持输入框里的默认值。
+$('recheck').onclick = runChecks;
+runChecks();
+</script>
+</body>
+</html>
